@@ -1283,6 +1283,9 @@
          specified -->
     <string name="default_wallpaper_component" translatable="false">@null</string>
 
+    <!-- By default a product has no distinct default wallpaper -->
+    <item name="default_wallpaper" type="drawable">@null</item>
+    
     <!-- By default a product has no distinct default lock wallpaper -->
     <item name="default_lock_wallpaper" type="drawable">@null</item>
 
