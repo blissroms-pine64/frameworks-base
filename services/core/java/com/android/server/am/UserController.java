@@ -447,15 +447,6 @@ final class UserController {
         }
     }
 
-    private static boolean isFirstBootOrUpgrade() {
-        IPackageManager pm = AppGlobals.getPackageManager();
-        try {
-            return pm.isFirstBoot() || pm.isUpgrade();
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
-    }
-
     int stopUser(final int userId, final boolean force, final IStopUserCallback callback) {
         if (mService.checkCallingPermission(INTERACT_ACROSS_USERS_FULL)
                 != PackageManager.PERMISSION_GRANTED) {
