@@ -2086,9 +2086,6 @@ static jintArray android_content_AssetManager_getStyleAttributes(JNIEnv* env, jo
 
 static void android_content_AssetManager_init(JNIEnv* env, jobject clazz, jboolean isSystem)
 {
-    if (isSystem) {
-        verifySystemIdmaps();
-    }
     AssetManager* am = new AssetManager();
     if (am == NULL) {
         jniThrowException(env, "java/lang/OutOfMemoryError", "");

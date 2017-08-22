@@ -45,6 +45,9 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
     <uses-permission android:name="android.permission.GET_APP_OPS_STATS" />
 
+    <!-- Screen recording -->
+    <uses-permission android:name="android.permission.ACCESS_SURFACE_FLINGER" />
+
     <!-- Networking and telephony -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
@@ -52,6 +55,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
@@ -165,6 +169,14 @@
     <!-- shortcut manager -->
     <uses-permission android:name="android.permission.RESET_SHORTCUT_MANAGER_THROTTLING" />
 
+    <!-- Sync tile -->
+    <uses-permission android:name="android.permission.READ_SYNC_SETTINGS" />
+    <uses-permission android:name="android.permission.WRITE_SYNC_SETTINGS" />
+
+    <!-- Reboot -->
+    <uses-permission android:name="android.permission.REBOOT" />
+    <uses-permission android:name="android.permission.RECOVERY" />
+
     <application
         android:name=".SystemUIApplication"
         android:persistent="true"
@@ -213,12 +225,21 @@
             </intent-filter>
         </receiver>
 
+        <!-- started from PhoneWindowManager
+             TODO: Should have an android:permission attribute -->
+        <service android:name=".omni.screenrecord.TakeScreenrecordService"
+            android:process=":screenrecord"
+            android:exported="false" />
+
+        <service android:name=".LoadAverageService"
+                android:exported="true" />
+
         <service android:name=".ImageWallpaper"
                 android:permission="android.permission.BIND_WALLPAPER"
                 android:exported="true" />
 
         <activity android:name=".tuner.TunerActivity"
-                  android:enabled="false"
+                  android:enabled="true"
                   android:icon="@drawable/tuner"
                   android:theme="@style/TunerSettings"
                   android:label="@string/system_ui_tuner"
@@ -258,7 +279,7 @@
                   android:excludeFromRecents="true"
                   android:stateNotNeeded="true"
                   android:resumeWhilePausing="true"
-                  android:screenOrientation="behind"
+                  android:screenOrientation="fullUser"
                   android:resizeableActivity="true"
                   android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden"
                   android:theme="@style/RecentsTheme.Wallpaper">
@@ -299,6 +320,15 @@
         <receiver android:name=".screenshot.GlobalScreenshot$DeleteScreenshotReceiver"
                   android:process=":screenshot"
                   android:exported="false" />
+
+        <activity
+            android:name=".bliss.LockscreenShortcutsActivity"
+            android:icon="@drawable/tuner"
+            android:label="@string/lockscreen_targets_message"
+            android:theme="@android:style/Theme.Material.Settings"
+            android:process=":cmsettings"
+            android:exported="true">
+        </activity>
 
         <!-- started from UsbDeviceSettingsManager -->
         <activity android:name=".usb.UsbConfirmActivity"
@@ -436,7 +466,7 @@
             android:exported="true"
             android:label="@string/dessert_case"
             android:permission="android.permission.BIND_DREAM_SERVICE"
-            android:enabled="false"
+            android:enabled="true"
             android:process=":sweetsweetdesserts"
             >
             <intent-filter>
@@ -452,7 +482,7 @@
 
         <activity android:name=".Somnambulator"
             android:label="@string/start_dreams"
-            android:icon="@mipmap/ic_launcher_dreams"
+            android:icon="@drawable/icon"
             android:theme="@android:style/Theme.Wallpaper.NoTitleBar"
             android:exported="true"
             android:excludeFromRecents="true"

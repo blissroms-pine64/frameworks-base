@@ -774,7 +774,7 @@
 
     <!-- Control whether Night display is available. This should only be enabled on devices
          with HWC 2.0 or higher. -->
-    <bool name="config_nightDisplayAvailable">false</bool>
+    <bool name="config_nightDisplayAvailable">true</bool>
 
     <!-- Default mode to control how Night display is automatically activated.
          One of the following values (see NightDisplayController.java):
@@ -970,13 +970,31 @@
     <integer name="config_notificationsBatteryMediumARGB">0xFFFFFF00</integer>
 
     <!-- Default value for led color when battery is fully charged -->
-    <integer name="config_notificationsBatteryFullARGB">0xFF00FF00</integer>
+    <integer name="config_notificationsBatteryFullARGB">0xFFFFFF00</integer>
+
+    <!-- Default value for led color when battery is really fully charged -->
+    <integer name="config_notificationsBatteryReallyFullARGB">0xFF00FF00</integer>
 
     <!-- Default value for LED on time when the battery is low on charge in miliseconds -->
     <integer name="config_notificationsBatteryLedOn">125</integer>
 
     <!-- Is the notification LED intrusive? Used to decide if there should be a disable option -->
-    <bool name="config_intrusiveNotificationLed">false</bool>
+    <bool name="config_intrusiveNotificationLed">true</bool>
+
+    <!-- Does the notification LED support multiple colors?
+         Used to decide if the user can change the colors -->
+    <bool name="config_multiColorNotificationLed">true</bool>
+
+    <!-- Is the battery LED intrusive? Used to decide if there should be a disable option -->
+    <bool name="config_intrusiveBatteryLed">true</bool>
+
+    <!-- Does the battery LED support multiple colors?
+         Used to decide if the user can change the colors -->
+    <bool name="config_multiColorBatteryLed">true</bool>
+
+    <!-- Do the battery/notification LEDs support pulsing?
+         Used to decide if we show pulse settings -->
+    <bool name="config_ledCanPulse">true</bool>
 
     <!-- Default value for LED off time when the battery is low on charge in miliseconds -->
     <integer name="config_notificationsBatteryLedOff">2875</integer>
@@ -1918,8 +1936,10 @@
     <integer name="config_safe_media_volume_index">10</integer>
 
     <!-- Configure mobile network MTU. The standard default is set here but each carrier
-         may have a specific value set in an overlay config.xml file. -->
-    <integer name="config_mobile_mtu">1500</integer>
+         may have a specific value set in an overlay config.xml file. 
+         This really must be 1358 as per 3GPP standards and packet segmentation on the LTE
+         radio.-->
+    <integer name="config_mobile_mtu">1358</integer>
 
     <!-- Configure mobile tcp buffer sizes in the form:
          rat-name:rmem_min,rmem_def,rmem_max,wmem_min,wmem_def,wmem_max
@@ -2029,6 +2049,16 @@
         <item>100</item>
         <item>150</item>
         <item>100</item>
+    </integer-array>
+
+    <!-- Vibrator pattern to be used as for notifications while alerts
+         are disabled (e.g. during phone calls) if enabled by the user.
+     -->
+    <integer-array name="config_notificationNoAlertsVibePattern">
+        <item>0</item>
+        <item>50</item>
+        <item>100</item>
+        <item>50</item>
     </integer-array>
 
     <!-- Flag indicating if the speed up audio on mt call code should be executed -->

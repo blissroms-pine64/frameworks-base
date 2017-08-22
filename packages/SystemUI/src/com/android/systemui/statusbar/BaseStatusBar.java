@@ -44,6 +44,7 @@ import android.database.ContentObserver;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
+import com.android.systemui.recents.RecentsActivity;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
@@ -51,6 +52,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.PowerManager;
+import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemProperties;
@@ -114,9 +116,11 @@ import com.android.systemui.statusbar.policy.RemoteInputView;
 import com.android.systemui.statusbar.stack.NotificationStackScrollLayout;
 import com.android.systemui.statusbar.stack.StackStateAnimator;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -171,7 +175,7 @@ public abstract class BaseStatusBar extends SystemUI implements
     protected H mHandler = createHandler();
 
     // all notifications
-    protected NotificationData mNotificationData;
+    public static NotificationData mNotificationData;
     protected NotificationStackScrollLayout mStackScroller;
 
     protected NotificationGroupManager mGroupManager = new NotificationGroupManager();
@@ -213,6 +217,7 @@ public abstract class BaseStatusBar extends SystemUI implements
     private float mFontScale;
 
     protected boolean mUseHeadsUp = false;
+    protected boolean mHeadsUpUserEnabled = false;
     protected boolean mHeadsUpTicker = false;
     protected boolean mDisableNotificationAlerts = false;
 
@@ -275,6 +280,8 @@ public abstract class BaseStatusBar extends SystemUI implements
     protected AssistManager mAssistManager;
 
     protected boolean mVrMode;
+
+    private static final HashMap<String, Field> fieldCache = new HashMap<String, Field>();
 
     private Set<String> mNonBlockablePkgs;
 
@@ -605,6 +612,10 @@ public abstract class BaseStatusBar extends SystemUI implements
         public void onListenerConnected() {
             if (DEBUG) Log.d(TAG, "onListenerConnected");
             final StatusBarNotification[] notifications = getActiveNotifications();
+            if (notifications == null) {
+                Log.w(TAG, "onListenerConnected unable to get active notifications.");
+                return;
+            }
             final RankingMap currentRanking = getCurrentRanking();
             mHandler.post(new Runnable() {
                 @Override
@@ -962,6 +973,10 @@ public abstract class BaseStatusBar extends SystemUI implements
             mLayoutDirection = ld;
             refreshLayout(ld);
         }
+
+        if (mAssistManager != null) {
+            mAssistManager.onConfigurationChanged();
+        }
     }
 
     protected void onDensityOrFontScaleChanged() {
@@ -1268,6 +1283,7 @@ public abstract class BaseStatusBar extends SystemUI implements
 
     @Override
     public void toggleRecentApps() {
+        RecentsActivity.startBlurTask();
         toggleRecents();
     }
 
@@ -1316,6 +1332,12 @@ public abstract class BaseStatusBar extends SystemUI implements
         int msg = MSG_SHOW_PREV_AFFILIATED_TASK;
         mHandler.removeMessages(msg);
         mHandler.sendEmptyMessage(msg);
+    }
+
+    @Override
+    public void restartUI() {
+        Log.d(TAG, "StatusBar API restartUI! Commiting suicide! Goodbye cruel world!");
+        Process.killProcess(Process.myPid());
     }
 
     protected H createHandler() {
@@ -1521,6 +1543,78 @@ public abstract class BaseStatusBar extends SystemUI implements
                     notification.getUserId());
         } catch (android.os.RemoteException ex) {
             // oh well
+        }
+    }
+    
+    public static void updatePreferences() {
+
+        if (mNotificationData == null)
+            return;
+
+        for (Entry entry : mNotificationData.getActiveNotifications()) {
+            NotificationBackgroundView mBackgroundNormal = (NotificationBackgroundView) getObjectField(entry.row, "mBackgroundNormal");
+            NotificationBackgroundView mBackgroundDimmed = (NotificationBackgroundView) getObjectField(entry.row, "mBackgroundDimmed");
+
+            mBackgroundNormal.postInvalidate();
+            mBackgroundDimmed.postInvalidate();
+        }
+    }
+
+
+    public static Object getObjectField(Object obj, String fieldName) {
+        try {
+            return findField(obj.getClass(), fieldName).get(obj);
+        } catch (IllegalAccessException e) {
+            throw new IllegalAccessError(e.getMessage());
+        } catch (IllegalArgumentException e) {
+            throw e;
+        }
+    }
+
+
+    /**
+     * Look up a field in a class and set it to accessible. The result is cached.
+     * If the field was not found, a {@link NoSuchFieldError} will be thrown.
+     */
+    public static Field findField(Class<?> clazz, String fieldName) {
+        StringBuilder sb = new StringBuilder(clazz.getName());
+        sb.append('#');
+        sb.append(fieldName);
+        String fullFieldName = sb.toString();
+
+        if (fieldCache.containsKey(fullFieldName)) {
+            Field field = fieldCache.get(fullFieldName);
+            if (field == null)
+                throw new NoSuchFieldError(fullFieldName);
+            return field;
+        }
+
+        try {
+            Field field = findFieldRecursiveImpl(clazz, fieldName);
+            field.setAccessible(true);
+            fieldCache.put(fullFieldName, field);
+            return field;
+        } catch (NoSuchFieldException e) {
+            fieldCache.put(fullFieldName, null);
+            throw new NoSuchFieldError(fullFieldName);
+        }
+    }
+
+    private static Field findFieldRecursiveImpl(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        try {
+            return clazz.getDeclaredField(fieldName);
+        } catch (NoSuchFieldException e) {
+            while (true) {
+                clazz = clazz.getSuperclass();
+                if (clazz == null || clazz.equals(Object.class))
+                    break;
+
+                try {
+                    return clazz.getDeclaredField(fieldName);
+                } catch (NoSuchFieldException ignored) {
+                }
+            }
+            throw e;
         }
     }
 
@@ -2368,8 +2462,10 @@ public abstract class BaseStatusBar extends SystemUI implements
         }
     }
 
+    protected abstract void haltTicker();
     protected abstract void setAreThereNotifications();
     protected abstract void updateNotifications();
+    protected abstract void tick(StatusBarNotification n, boolean firstTime);
     public abstract boolean shouldDisableNavbarGestures();
 
     public abstract void addNotification(StatusBarNotification notification,
@@ -2406,6 +2502,9 @@ public abstract class BaseStatusBar extends SystemUI implements
                     + " shouldPeek=" + shouldPeek
                     + " alertAgain=" + alertAgain);
         }
+        boolean updateTicker = n.tickerText != null
+                && !TextUtils.equals(n.tickerText,
+                entry.notification.getNotification().tickerText);
 
         final StatusBarNotification oldNotification = entry.notification;
         entry.notification = notification;
@@ -2464,10 +2563,14 @@ public abstract class BaseStatusBar extends SystemUI implements
             mStackScroller.snapViewIfNeeded(entry.row);
         }
 
-        if (DEBUG) {
-            // Is this for you?
-            boolean isForCurrentUser = isNotificationForCurrentProfiles(notification);
-            Log.d(TAG, "notification is " + (isForCurrentUser ? "" : "not ") + "for you");
+        // Is this for you?
+        boolean isForCurrentUser = isNotificationForCurrentProfiles(notification);
+        Log.d(TAG, "notification is " + (isForCurrentUser ? "" : "not ") + "for you");
+
+        // Restart the ticker if it's still running
+        if (updateTicker && isForCurrentUser) {
+            haltTicker();
+            tick(notification, false);
         }
 
         setAreThereNotifications();
@@ -2540,7 +2643,7 @@ public abstract class BaseStatusBar extends SystemUI implements
     }
 
     protected boolean shouldPeek(Entry entry, StatusBarNotification sbn) {
-        if (!mUseHeadsUp || isDeviceInVrMode()) {
+        if (!mUseHeadsUp || !mHeadsUpUserEnabled || isDeviceInVrMode()) {
             return false;
         }
 

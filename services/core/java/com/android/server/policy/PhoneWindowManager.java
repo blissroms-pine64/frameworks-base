@@ -127,6 +127,7 @@ import android.view.KeyCharacterMap;
 import android.view.KeyCharacterMap.FallbackAction;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.WindowManagerPolicyControl;
 import android.view.Surface;
 import android.view.View;
 import android.view.ViewConfiguration;
@@ -461,6 +462,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     int mUserRotationMode = WindowManagerPolicy.USER_ROTATION_FREE;
     int mUserRotation = Surface.ROTATION_0;
+    int mUserRotationAngles = -1;
     boolean mAccelerometerDefault;
 
     boolean mSupportAutoRotation;
@@ -490,6 +492,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     boolean mHasSoftInput = false;
     boolean mTranslucentDecorEnabled = true;
     boolean mUseTvRouting;
+
+    boolean mVolumeRockerWake;
+    boolean mVolBtnMusicControls;
+    boolean mIsLongPress;
 
     int mPointerLocationMode = 0; // guarded by mLock
 
@@ -524,6 +530,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     // fullscreen window flag, these are the stable dimensions without the status bar.
     int mStableFullscreenLeft, mStableFullscreenTop;
     int mStableFullscreenRight, mStableFullscreenBottom;
+    // For force immersive mode
+    int mForceImmersiveLeft, mForceImmersiveTop;
+    int mForceImmersiveRight, mForceImmersiveBottom;
     // During layout, the current screen borders with all outer decoration
     // (status bar, input method dock) accounted for.
     int mCurLeft, mCurTop, mCurRight, mCurBottom;
@@ -701,12 +710,19 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     // Increase the chord delay when taking a screenshot from the keyguard
     private static final float KEYGUARD_SCREENSHOT_CHORD_DELAY_MULTIPLIER = 2.5f;
     private boolean mScreenshotChordEnabled;
-    private boolean mScreenshotChordVolumeDownKeyTriggered;
-    private long mScreenshotChordVolumeDownKeyTime;
     private boolean mScreenshotChordVolumeDownKeyConsumed;
-    private boolean mScreenshotChordVolumeUpKeyTriggered;
-    private boolean mScreenshotChordPowerKeyTriggered;
-    private long mScreenshotChordPowerKeyTime;
+
+    // used for both screenshot and screenrecord
+    private long mVolumeDownKeyTime;
+    private boolean mVolumeDownKeyTriggered;
+    private boolean mVolumeUpKeyTriggered;
+    private long mVolumeUpKeyTime;
+    private boolean mPowerKeyTriggered;
+    private long mPowerKeyTime;
+
+    // use the same delay values as for screenshot
+    private boolean mScreenrecordChordEnabled;
+    private boolean mScreenrecordChordVolumeUpKeyConsumed;
 
     /* The number of steps between min and max brightness */
     private static final int BRIGHTNESS_STEPS = 10;
@@ -749,10 +765,14 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private static final int MSG_SHOW_TV_PICTURE_IN_PICTURE_MENU = 17;
     private static final int MSG_BACK_LONG_PRESS = 18;
     private static final int MSG_DISPOSE_INPUT_CONSUMER = 19;
-    private static final int MSG_BACK_DELAYED_PRESS = 20;
+    private static final int MSG_DISPATCH_VOLKEY_WITH_WAKE_LOCK = 20;
+    private static final int MSG_BACK_DELAYED_PRESS = 21;
 
     private static final int MSG_REQUEST_TRANSIENT_BARS_ARG_STATUS = 0;
     private static final int MSG_REQUEST_TRANSIENT_BARS_ARG_NAVIGATION = 1;
+
+    private boolean mClearedBecauseOfForceShow;
+    private boolean mTopWindowIsKeyguard;
 
     private class PolicyHandler extends Handler {
         @Override
@@ -769,6 +789,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     break;
                 case MSG_DISPATCH_MEDIA_KEY_REPEAT_WITH_WAKE_LOCK:
                     dispatchMediaKeyRepeatWithWakeLock((KeyEvent)msg.obj);
+                    break;
+                case MSG_DISPATCH_VOLKEY_WITH_WAKE_LOCK:
+                    dispatchMediaKeyWithWakeLockToAudioService((KeyEvent)msg.obj);
+                    dispatchMediaKeyWithWakeLockToAudioService(KeyEvent.changeAction((KeyEvent)msg.obj, KeyEvent.ACTION_UP));
                     break;
                 case MSG_DISPATCH_SHOW_RECENTS:
                     showRecentApps(false, msg.arg1 != 0);
@@ -876,6 +900,15 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(Settings.Global.getUriFor(
                     Settings.Global.POLICY_CONTROL), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.ACCELEROMETER_ROTATION_ANGLES), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.VOLUME_ROCKER_WAKE), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.VOLUME_ROCKER_MUSIC_CONTROLS), false, this,
                     UserHandle.USER_ALL);
             updateSettings();
         }
@@ -1131,11 +1164,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         }
 
         // Latch power key state to detect screenshot chord.
-        if (interactive && !mScreenshotChordPowerKeyTriggered
+        if (interactive && !mPowerKeyTriggered
                 && (event.getFlags() & KeyEvent.FLAG_FALLBACK) == 0) {
-            mScreenshotChordPowerKeyTriggered = true;
-            mScreenshotChordPowerKeyTime = event.getDownTime();
+            mPowerKeyTriggered = true;
+            mPowerKeyTime = event.getDownTime();
             interceptScreenshotChord();
+            interceptScreenrecordChord();
         }
 
         // Stop ringing or end call if configured to do so when power is pressed.
@@ -1168,8 +1202,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         // If the power key has still not yet been handled, then detect short
         // press, long press, or multi press and decide what to do.
-        mPowerKeyHandled = hungUp || mScreenshotChordVolumeDownKeyTriggered
-                || mScreenshotChordVolumeUpKeyTriggered || gesturedServiceIntercepted;
+        mPowerKeyHandled = hungUp || mVolumeDownKeyTriggered || gesturedServiceIntercepted || mVolumeUpKeyTriggered;
         if (!mPowerKeyHandled) {
             if (interactive) {
                 // When interactive, we're already awake.
@@ -1204,7 +1237,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private void interceptPowerKeyUp(KeyEvent event, boolean interactive, boolean canceled) {
         final boolean handled = canceled || mPowerKeyHandled;
-        mScreenshotChordPowerKeyTriggered = false;
+        mPowerKeyTriggered = false;
         cancelPendingScreenshotChordAction();
         cancelPendingPowerKeyAction();
 
@@ -1439,16 +1472,29 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private void interceptScreenshotChord() {
         if (mScreenshotChordEnabled
-                && mScreenshotChordVolumeDownKeyTriggered && mScreenshotChordPowerKeyTriggered
-                && !mScreenshotChordVolumeUpKeyTriggered) {
+                && mVolumeDownKeyTriggered && mPowerKeyTriggered && !mVolumeUpKeyTriggered) {
             final long now = SystemClock.uptimeMillis();
-            if (now <= mScreenshotChordVolumeDownKeyTime + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS
-                    && now <= mScreenshotChordPowerKeyTime
+            if (now <= mVolumeDownKeyTime + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS
+                    && now <= mPowerKeyTime
                             + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS) {
                 mScreenshotChordVolumeDownKeyConsumed = true;
                 cancelPendingPowerKeyAction();
                 mScreenshotRunnable.setScreenshotType(TAKE_SCREENSHOT_FULLSCREEN);
                 mHandler.postDelayed(mScreenshotRunnable, getScreenshotChordLongPressDelay());
+            }
+        }
+    }
+
+    private void interceptScreenrecordChord() {
+        if (mScreenrecordChordEnabled
+                && mVolumeUpKeyTriggered && mPowerKeyTriggered && !mVolumeDownKeyTriggered) {
+            final long now = SystemClock.uptimeMillis();
+            if (now <= mVolumeUpKeyTime + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS
+                    && now <= mPowerKeyTime + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS) {
+                mScreenrecordChordVolumeUpKeyConsumed = true;
+                cancelPendingPowerKeyAction();
+
+                mHandler.postDelayed(mScreenrecordRunnable, getScreenshotChordLongPressDelay());
             }
         }
     }
@@ -1464,6 +1510,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private void cancelPendingScreenshotChordAction() {
         mHandler.removeCallbacks(mScreenshotRunnable);
+    }
+
+    private void cancelPendingScreenrecordChordAction() {
+        mHandler.removeCallbacks(mScreenrecordRunnable);
     }
 
     private final Runnable mEndCallLongPress = new Runnable() {
@@ -1491,6 +1541,13 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     private final ScreenshotRunnable mScreenshotRunnable = new ScreenshotRunnable();
+
+    private final Runnable mScreenrecordRunnable = new Runnable() {
+        @Override
+        public void run() {
+            takeScreenrecord();
+        }
+    };
 
     @Override
     public void showGlobalActions() {
@@ -1897,6 +1954,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         mScreenshotChordEnabled = mContext.getResources().getBoolean(
                 com.android.internal.R.bool.config_enableScreenshotChord);
+        mScreenrecordChordEnabled = mContext.getResources().getBoolean(
+                com.android.internal.R.bool.config_enableScreenrecordChord);
 
         mGlobalKeyManager = new GlobalKeyManager(mContext);
 
@@ -2068,6 +2127,14 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     Settings.Secure.INCALL_BACK_BUTTON_BEHAVIOR_DEFAULT,
                     UserHandle.USER_CURRENT);
 
+            // volume rocker wake
+            mVolumeRockerWake = Settings.System.getIntForUser(resolver,
+                    Settings.System.VOLUME_ROCKER_WAKE, 0, UserHandle.USER_CURRENT) != 0;
+
+            // volume rocker music control
+            mVolBtnMusicControls = (Settings.System.getIntForUser(resolver,
+                    Settings.System.VOLUME_ROCKER_MUSIC_CONTROLS, 0, UserHandle.USER_CURRENT) == 1);
+
             // Configure wake gesture.
             boolean wakeGestureEnabledSetting = Settings.Secure.getIntForUser(resolver,
                     Settings.Secure.WAKE_GESTURE_ENABLED, 0,
@@ -2095,6 +2162,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 updateOrientationListenerLp();
             }
 
+             mUserRotationAngles = Settings.System.getIntForUser(resolver,
+                    Settings.System.ACCELEROMETER_ROTATION_ANGLES, -1,
+                    UserHandle.USER_CURRENT);
+
             if (mSystemReady) {
                 int pointerLocation = Settings.System.getIntForUser(resolver,
                         Settings.System.POINTER_LOCATION, 0, UserHandle.USER_CURRENT);
@@ -2119,7 +2190,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             }
         }
         synchronized (mWindowManagerFuncs.getWindowManagerLock()) {
-            PolicyControl.reloadFromSetting(mContext);
+            WindowManagerPolicyControl.reloadFromSetting(mContext);
         }
         if (updateRotation) {
             updateRotation(true);
@@ -3149,12 +3220,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     @Override
     public long interceptKeyBeforeDispatching(WindowState win, KeyEvent event, int policyFlags) {
         final boolean keyguardOn = keyguardOn();
-        final int keyCode = event.getKeyCode();
         final int repeatCount = event.getRepeatCount();
         final int metaState = event.getMetaState();
         final int flags = event.getFlags();
         final boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
         final boolean canceled = event.isCanceled();
+        int keyCode = event.getKeyCode();
 
         if (DEBUG_INPUT) {
             Log.d(TAG, "interceptKeyTi keyCode=" + keyCode + " down=" + down + " repeatCount="
@@ -3166,9 +3237,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         // but we're not sure, then tell the dispatcher to wait a little while and
         // try again later before dispatching.
         if (mScreenshotChordEnabled && (flags & KeyEvent.FLAG_FALLBACK) == 0) {
-            if (mScreenshotChordVolumeDownKeyTriggered && !mScreenshotChordPowerKeyTriggered) {
+            if (mVolumeDownKeyTriggered && !mPowerKeyTriggered) {
                 final long now = SystemClock.uptimeMillis();
-                final long timeoutTime = mScreenshotChordVolumeDownKeyTime
+                final long timeoutTime = mVolumeDownKeyTime
                         + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS;
                 if (now < timeoutTime) {
                     return timeoutTime - now;
@@ -3178,6 +3249,26 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     && mScreenshotChordVolumeDownKeyConsumed) {
                 if (!down) {
                     mScreenshotChordVolumeDownKeyConsumed = false;
+                }
+                return -1;
+            }
+        }
+
+        // If we think we might have a volume up & power key chord on the way
+        // but we're not sure, then tell the dispatcher to wait a little while and
+        // try again later before dispatching.
+        if (mScreenrecordChordEnabled && (flags & KeyEvent.FLAG_FALLBACK) == 0) {
+            if (mVolumeUpKeyTriggered && !mPowerKeyTriggered) {
+                final long now = SystemClock.uptimeMillis();
+                final long timeoutTime = mVolumeUpKeyTime + SCREENSHOT_CHORD_DEBOUNCE_DELAY_MILLIS;
+                if (now < timeoutTime) {
+                    return timeoutTime - now;
+                }
+            }
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP
+                    && mScreenrecordChordVolumeUpKeyConsumed) {
+                if (!down) {
+                    mScreenrecordChordVolumeUpKeyConsumed = false;
                 }
                 return -1;
             }
@@ -3995,8 +4086,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     public boolean getInsetHintLw(WindowManager.LayoutParams attrs, Rect taskBounds,
             int displayRotation, int displayWidth, int displayHeight, Rect outContentInsets,
             Rect outStableInsets, Rect outOutsets) {
-        final int fl = PolicyControl.getWindowFlags(null, attrs);
-        final int sysuiVis = PolicyControl.getSystemUiVisibility(null, attrs);
+        final int fl = WindowManagerPolicyControl.getWindowFlags(null, attrs);
+        final int sysuiVis = WindowManagerPolicyControl.getSystemUiVisibility(null, attrs);
         final int systemUiVisibility = (sysuiVis | attrs.subtreeSystemUiVisibility);
 
         final boolean useOutsets = outOutsets != null && shouldUseOutsets(attrs, fl);
@@ -4138,13 +4229,13 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mRestrictedScreenWidth = mSystemGestures.screenWidth = mUnrestrictedScreenWidth;
         mRestrictedScreenHeight = mSystemGestures.screenHeight = mUnrestrictedScreenHeight;
         mDockLeft = mContentLeft = mVoiceContentLeft = mStableLeft = mStableFullscreenLeft
-                = mCurLeft = mUnrestrictedScreenLeft;
+                = mCurLeft = mForceImmersiveLeft = mUnrestrictedScreenLeft;
         mDockTop = mContentTop = mVoiceContentTop = mStableTop = mStableFullscreenTop
-                = mCurTop = mUnrestrictedScreenTop;
+                = mCurTop = mForceImmersiveTop = mUnrestrictedScreenTop;
         mDockRight = mContentRight = mVoiceContentRight = mStableRight = mStableFullscreenRight
-                = mCurRight = displayWidth - overscanRight;
+                = mCurRight = mForceImmersiveRight = displayWidth - overscanRight;
         mDockBottom = mContentBottom = mVoiceContentBottom = mStableBottom = mStableFullscreenBottom
-                = mCurBottom = displayHeight - overscanBottom;
+                = mCurBottom = mForceImmersiveBottom = displayHeight - overscanBottom;
         mDockLayer = 0x10000000;
         mStatusBarLayer = -1;
 
@@ -4478,6 +4569,19 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 ? attached.getFrameLw() : df);
     }
 
+    private void applyForceImmersiveMode(int pfl, Rect r) {
+        if ((pfl & PRIVATE_FLAG_STATUS_HIDE_FORCED) != 0) {
+            r.top = mForceImmersiveTop;
+        }
+        if ((pfl & PRIVATE_FLAG_NAV_HIDE_FORCED) != 0) {
+            if (mNavigationBarPosition == NAV_BAR_BOTTOM) {
+                r.bottom = mForceImmersiveBottom;
+            } else {
+                r.right = mForceImmersiveRight;
+            }
+        }
+    }
+
     private void applyStableConstraints(int sysui, int fl, Rect r) {
         if ((sysui & View.SYSTEM_UI_FLAG_LAYOUT_STABLE) != 0) {
             // If app is requesting a stable layout, don't let the
@@ -4522,10 +4626,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             offsetInputMethodWindowLw(mLastInputMethodWindow);
         }
 
-        final int fl = PolicyControl.getWindowFlags(win, attrs);
-        final int pfl = attrs.privateFlags;
+        final int fl = WindowManagerPolicyControl.getWindowFlags(win, attrs);
+        final int pfl = WindowManagerPolicyControl.getPrivateWindowFlags(win, attrs);
         final int sim = attrs.softInputMode;
-        final int sysUiFl = PolicyControl.getSystemUiVisibility(win, null);
+        final int sysUiFl = WindowManagerPolicyControl.getSystemUiVisibility(win, null);
 
         final Rect pf = mTmpParentFrame;
         final Rect df = mTmpDisplayFrame;
@@ -4738,7 +4842,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                         of.bottom = mUnrestrictedScreenTop + mUnrestrictedScreenHeight;
                     }
 
-                    if ((fl & FLAG_FULLSCREEN) == 0) {
+                    if ((fl & FLAG_FULLSCREEN) == 0
+                            || (pfl & PRIVATE_FLAG_WAS_NOT_FULLSCREEN) != 0) {
                         if (win.isVoiceInteraction()) {
                             cf.left = mVoiceContentLeft;
                             cf.top = mVoiceContentTop;
@@ -4756,6 +4861,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                                 cf.right = mContentRight;
                                 cf.bottom = mContentBottom;
                             }
+                            applyForceImmersiveMode(pfl, cf);
                         }
                     } else {
                         // Full screen windows are always given a layout that is as if the
@@ -4776,6 +4882,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     } else {
                         vf.set(cf);
                     }
+                    applyForceImmersiveMode(pfl, vf);
                 }
             } else if ((fl & FLAG_LAYOUT_IN_SCREEN) != 0 || (sysUiFl
                     & (View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
@@ -4899,6 +5006,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 } else {
                     vf.set(cf);
                 }
+                applyForceImmersiveMode(pfl, vf);
             } else if (attached != null) {
                 if (DEBUG_LAYOUT) Slog.v(TAG, "layoutWindowLw(" + attrs.getTitle() +
                         "): attached to " + attached);
@@ -4956,6 +5064,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     } else {
                         vf.set(cf);
                     }
+                    applyForceImmersiveMode(pfl, vf);
                 }
             }
         }
@@ -5043,6 +5152,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         if (mContentBottom > top) {
             mContentBottom = top;
         }
+        if (mForceImmersiveBottom > top) {
+            mForceImmersiveBottom = top;
+        }
         if (mVoiceContentBottom > top) {
             mVoiceContentBottom = top;
         }
@@ -5102,7 +5214,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             WindowState attached) {
         if (DEBUG_LAYOUT) Slog.i(TAG, "Win " + win + ": isVisibleOrBehindKeyguardLw="
                 + win.isVisibleOrBehindKeyguardLw());
-        final int fl = PolicyControl.getWindowFlags(win, attrs);
+        final int fl = WindowManagerPolicyControl.getWindowFlags(win, attrs);
         if (mTopFullscreenOpaqueWindowState == null
                 && win.isVisibleLw() && attrs.type == TYPE_INPUT_METHOD) {
             mForcingShowNavBar = true;
@@ -5338,7 +5450,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     }
                 }
             } else if (mTopFullscreenOpaqueWindowState != null) {
-                final int fl = PolicyControl.getWindowFlags(null, lp);
+                final int fl = WindowManagerPolicyControl.getWindowFlags(null, lp);
                 if (localLOGV) {
                     Slog.d(TAG, "frame: " + mTopFullscreenOpaqueWindowState.getFrameLw()
                             + " shown position: "
@@ -5612,8 +5724,24 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         setHdmiPlugged(!mHdmiPlugged);
     }
 
+    /**
+     * @return Whether music is being played right now "locally" (e.g. on the device's speakers
+     *    or wired headphones) or "remotely" (e.g. on a device using the Cast protocol and
+     *    controlled by this device, or through remote submix).
+     */
+    private boolean isMusicActive() {
+        final AudioManager am = (AudioManager)mContext.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) {
+            Log.w(TAG, "isMusicActive: couldn't get AudioManager reference");
+            return false;
+        }
+        return am.isMusicActive();
+    }
+
     final Object mScreenshotLock = new Object();
+    final Object mScreenrecordLock = new Object();
     ServiceConnection mScreenshotConnection = null;
+    ServiceConnection mScreenrecordConnection = null;
 
     final Runnable mScreenshotTimeout = new Runnable() {
         @Override public void run() {
@@ -5626,6 +5754,67 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             }
         }
     };
+
+    final Runnable mScreenrecordTimeout = new Runnable() {
+        @Override public void run() {
+            synchronized (mScreenrecordLock) {
+                if (mScreenrecordConnection != null) {
+                    mContext.unbindService(mScreenrecordConnection);
+                    mScreenrecordConnection = null;
+                }
+            }
+        }
+    };
+
+    // Assume this is called from the Handler thread.
+    private void takeScreenrecord() {
+        synchronized (mScreenrecordLock) {
+            if (mScreenrecordConnection != null) {
+                return;
+            }
+            ComponentName cn = new ComponentName("com.android.systemui",
+                    "com.android.systemui.omni.screenrecord.TakeScreenrecordService");
+            Intent intent = new Intent();
+            intent.setComponent(cn);
+            ServiceConnection conn = new ServiceConnection() {
+                @Override
+                public void onServiceConnected(ComponentName name, IBinder service) {
+                    synchronized (mScreenrecordLock) {
+                        Messenger messenger = new Messenger(service);
+                        Message msg = Message.obtain(null, 1);
+                        final ServiceConnection myConn = this;
+                        Handler h = new Handler(mHandler.getLooper()) {
+                            @Override
+                            public void handleMessage(Message msg) {
+                                synchronized (mScreenrecordLock) {
+                                    if (mScreenrecordConnection == myConn) {
+                                        mContext.unbindService(mScreenrecordConnection);
+                                        mScreenrecordConnection = null;
+                                        mHandler.removeCallbacks(mScreenrecordTimeout);
+                                    }
+                                }
+                            }
+                        };
+                        msg.replyTo = new Messenger(h);
+                        msg.arg1 = msg.arg2 = 0;
+                        try {
+                            messenger.send(msg);
+                        } catch (RemoteException e) {
+                        }
+                    }
+                }
+                @Override
+                public void onServiceDisconnected(ComponentName name) {}
+            };
+            if (mContext.bindServiceAsUser(
+                    intent, conn, Context.BIND_AUTO_CREATE, UserHandle.CURRENT)) {
+                mScreenrecordConnection = conn;
+                // Screenrecord max duration is 30 minutes. Allow 31 minutes before killing
+                // the service.
+                mHandler.postDelayed(mScreenrecordTimeout, 31 * 60 * 1000);
+            }
+        }
+    }
 
     // Assume this is called from the Handler thread.
     private void takeScreenshot(final int screenshotType) {
@@ -5738,9 +5927,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         }
 
         // Basic policy based on interactive state.
+        final boolean isVolumeRockerWake = !isScreenOn()
+                && mVolumeRockerWake
+                && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN);
         int result;
         boolean isWakeKey = (policyFlags & WindowManagerPolicy.FLAG_WAKE) != 0
-                || event.isWakeKey();
+                || event.isWakeKey() || isVolumeRockerWake;
         if (interactive || (isInjected && !isWakeKey)) {
             // When the device is interactive or the key is injected pass the
             // key to the application.
@@ -5812,29 +6004,35 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             case KeyEvent.KEYCODE_VOLUME_MUTE: {
                 if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
                     if (down) {
-                        if (interactive && !mScreenshotChordVolumeDownKeyTriggered
+                        if (interactive && !mVolumeDownKeyTriggered
                                 && (event.getFlags() & KeyEvent.FLAG_FALLBACK) == 0) {
-                            mScreenshotChordVolumeDownKeyTriggered = true;
-                            mScreenshotChordVolumeDownKeyTime = event.getDownTime();
+                            mVolumeDownKeyTriggered = true;
+                            mVolumeDownKeyTime = event.getDownTime();
                             mScreenshotChordVolumeDownKeyConsumed = false;
                             cancelPendingPowerKeyAction();
+                            cancelPendingScreenrecordChordAction();
                             interceptScreenshotChord();
                         }
                     } else {
-                        mScreenshotChordVolumeDownKeyTriggered = false;
+                        mVolumeDownKeyTriggered = false;
                         cancelPendingScreenshotChordAction();
+                        cancelPendingScreenrecordChordAction();
                     }
                 } else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
                     if (down) {
-                        if (interactive && !mScreenshotChordVolumeUpKeyTriggered
+                        if (interactive && !mVolumeUpKeyTriggered
                                 && (event.getFlags() & KeyEvent.FLAG_FALLBACK) == 0) {
-                            mScreenshotChordVolumeUpKeyTriggered = true;
+                            mVolumeUpKeyTriggered = true;
+                            mVolumeUpKeyTime = event.getDownTime();
+                            mScreenrecordChordVolumeUpKeyConsumed = false;
                             cancelPendingPowerKeyAction();
                             cancelPendingScreenshotChordAction();
+                            interceptScreenrecordChord();
                         }
                     } else {
-                        mScreenshotChordVolumeUpKeyTriggered = false;
+                        mVolumeUpKeyTriggered = false;
                         cancelPendingScreenshotChordAction();
+                        cancelPendingScreenrecordChordAction();
                     }
                 }
                 if (down) {
@@ -5870,19 +6068,39 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                         }
                     }
                 }
-                if (mUseTvRouting) {
-                    // On TVs, defer special key handlings to
-                    // {@link interceptKeyBeforeDispatching()}.
-                    result |= ACTION_PASS_TO_USER;
-                } else if ((result & ACTION_PASS_TO_USER) == 0) {
+
+                if (isMusicActive() && (result & ACTION_PASS_TO_USER) == 0) {
+                    if (mVolBtnMusicControls && down && (keyCode != KeyEvent.KEYCODE_VOLUME_MUTE)) {
+                        mIsLongPress = false;
+                        int newKeyCode = event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_UP ?
+                                KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS;
+                        Message msg = mHandler.obtainMessage(
+                                MSG_DISPATCH_VOLKEY_WITH_WAKE_LOCK,
+                                new KeyEvent(event.getDownTime(), event.getEventTime(), event
+                                        .getAction(), newKeyCode, 0));
+                        msg.setAsynchronous(true);
+                        mHandler.sendMessageDelayed(msg, ViewConfiguration.getLongPressTimeout());
+                        break;
+                    } else {
+                        if (mVolBtnMusicControls && !down) {
+                            mHandler.removeMessages(MSG_DISPATCH_VOLKEY_WITH_WAKE_LOCK);
+                            if (mIsLongPress) {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if ((result & ACTION_PASS_TO_USER) == 0) {
                     // If we aren't passing to the user and no one else
-                    // handled it send it to the session manager to
-                    // figure out.
+                    // handled it send it to the session manager to figure
+                    // out.
                     MediaSessionLegacyHelper.getHelper(mContext)
                             .sendVolumeKeyEvent(event, true);
+                    break;
                 }
-                break;
             }
+                break;
 
             case KeyEvent.KEYCODE_ENDCALL: {
                 result &= ~ACTION_PASS_TO_USER;
@@ -6109,6 +6327,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             // ignore volume keys unless docked
             case KeyEvent.KEYCODE_VOLUME_UP:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
+                if (mVolumeRockerWake) {
+                    return true;
+                }
             case KeyEvent.KEYCODE_VOLUME_MUTE:
                 return mDockMode != Intent.EXTRA_DOCK_STATE_UNDOCKED;
 
@@ -6869,10 +7090,30 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     mAllowAllRotations = mContext.getResources().getBoolean(
                             com.android.internal.R.bool.config_allowAllRotations) ? 1 : 0;
                 }
-                if (sensorRotation != Surface.ROTATION_180
-                        || mAllowAllRotations == 1
-                        || orientation == ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-                        || orientation == ActivityInfo.SCREEN_ORIENTATION_FULL_USER) {
+                // Rotation setting bitmask
+                // 1=0 2=90 4=180 8=270
+                boolean allowed = true;
+                if (mUserRotationAngles < 0) {
+                    // Not set by user so use these defaults
+                    mUserRotationAngles = mAllowAllRotations == 1 ?
+                            (1 | 2 | 4 | 8) : // All angles
+                                (1 | 2 | 8); // All except 180
+                }
+                switch (sensorRotation) {
+                    case Surface.ROTATION_0:
+                        allowed = (mUserRotationAngles & 1) != 0;
+                        break;
+                    case Surface.ROTATION_90:
+                        allowed = (mUserRotationAngles & 2) != 0;
+                        break;
+                    case Surface.ROTATION_180:
+                        allowed = (mUserRotationAngles & 4) != 0;
+                        break;
+                    case Surface.ROTATION_270:
+                        allowed = (mUserRotationAngles & 8) != 0;
+                        break;
+                }
+                if (allowed) {
                     preferredRotation = sensorRotation;
                 } else {
                     preferredRotation = lastRotation;
@@ -7595,11 +7836,28 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             return 0;
         }
 
-        int tmpVisibility = PolicyControl.getSystemUiVisibility(win, null)
+        int tmpVisibility = WindowManagerPolicyControl.getSystemUiVisibility(win, null)
                 & ~mResettingSystemUiFlags
                 & ~mForceClearedSystemUiFlags;
+        boolean wasCleared = mClearedBecauseOfForceShow;
         if (mForcingShowNavBar && win.getSurfaceLayer() < mForcingShowNavBarLayer) {
-            tmpVisibility &= ~PolicyControl.adjustClearableFlags(win, View.SYSTEM_UI_CLEARABLE_FLAGS);
+            tmpVisibility &=
+                    ~WindowManagerPolicyControl.adjustClearableFlags(win,
+                            View.SYSTEM_UI_CLEARABLE_FLAGS);
+            mClearedBecauseOfForceShow = true;
+        } else {
+            mClearedBecauseOfForceShow = false;
+        }
+
+        // The window who requested navbar force showing disappeared and next window wants
+        // to hide navbar. Instead of hiding we will make it transient. SystemUI will take care
+        // about hiding after timeout. This should not happen if next window is keyguard because
+        // transient state have more priority than translucent (why?) and cause bad UX
+        if (wasCleared && !mClearedBecauseOfForceShow
+                && (tmpVisibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) != 0) {
+            mNavigationBarController.showTransient();
+            tmpVisibility |= View.NAVIGATION_BAR_TRANSIENT;
+            mWindowManagerFuncs.addSystemUIVisibilityFlag(View.NAVIGATION_BAR_TRANSIENT);
         }
 
         final int fullscreenVisibility = updateLightStatusBarLw(0 /* vis */,
@@ -7608,6 +7866,19 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 mTopDockedOpaqueWindowState, mTopDockedOpaqueOrDimmingWindowState);
         mWindowManagerFuncs.getStackBounds(HOME_STACK_ID, mNonDockedStackBounds);
         mWindowManagerFuncs.getStackBounds(DOCKED_STACK_ID, mDockedStackBounds);
+
+        boolean topWindowWasKeyguard = mTopWindowIsKeyguard;
+        mTopWindowIsKeyguard = (win.getAttrs().privateFlags & PRIVATE_FLAG_KEYGUARD) != 0;
+        if (topWindowWasKeyguard && !mTopWindowIsKeyguard
+                && (tmpVisibility & View.SYSTEM_UI_FLAG_FULLSCREEN) != 0) {
+            mStatusBarController.showTransient();
+            tmpVisibility |= View.STATUS_BAR_TRANSIENT;
+            mWindowManagerFuncs.addSystemUIVisibilityFlag(View.STATUS_BAR_TRANSIENT);
+        }
+
+        tmpVisibility = updateLightStatusBarLw(tmpVisibility,
+                mTopFullscreenOpaqueWindowState, mTopFullscreenOpaqueOrDimmingWindowState);
+
         final int visibility = updateSystemBarsLw(win, mLastSystemUiFlags, tmpVisibility);
         final int diff = visibility ^ mLastSystemUiFlags;
         final int fullscreenDiff = fullscreenVisibility ^ mLastFullscreenStackSysUiFlags;
@@ -7651,7 +7922,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 // If the top fullscreen-or-dimming window is also the top fullscreen, respect
                 // its light flag.
                 vis &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-                vis |= PolicyControl.getSystemUiVisibility(statusColorWin, null)
+                vis |= WindowManagerPolicyControl.getSystemUiVisibility(statusColorWin, null)
                         & View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
             } else if (statusColorWin != null && statusColorWin.isDimming()) {
                 // Otherwise if it's dimming, clear the light flag.
@@ -7729,8 +8000,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         boolean immersiveSticky =
                 (vis & View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY) != 0;
         final boolean hideStatusBarWM =
-                mTopFullscreenOpaqueWindowState != null
-                && (PolicyControl.getWindowFlags(mTopFullscreenOpaqueWindowState, null)
+                mTopFullscreenOpaqueWindowState != null &&
+                (WindowManagerPolicyControl.getWindowFlags(mTopFullscreenOpaqueWindowState, null)
                         & WindowManager.LayoutParams.FLAG_FULLSCREEN) != 0;
         final boolean hideStatusBarSysui =
                 (vis & View.SYSTEM_UI_FLAG_FULLSCREEN) != 0;
@@ -8140,7 +8411,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mGlobalKeyManager.dump(prefix, pw);
         mStatusBarController.dump(pw, prefix);
         mNavigationBarController.dump(pw, prefix);
-        PolicyControl.dump(prefix, pw);
+        WindowManagerPolicyControl.dump(prefix, pw);
 
         if (mWakeGestureListener != null) {
             mWakeGestureListener.dump(pw, prefix);

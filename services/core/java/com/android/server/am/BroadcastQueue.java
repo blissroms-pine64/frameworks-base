@@ -268,7 +268,7 @@ public final class BroadcastQueue {
 
         r.receiver = app.thread.asBinder();
         r.curApp = app;
-        app.curReceiver = r;
+        app.curReceivers.add(r);
         app.forceProcessStateUpTo(ActivityManager.PROCESS_STATE_RECEIVER);
         mService.updateLruProcessLocked(app, false, null);
         mService.updateOomAdjLocked();
@@ -296,7 +296,7 @@ public final class BroadcastQueue {
                         "Process cur broadcast " + r + ": NOT STARTED!");
                 r.receiver = null;
                 r.curApp = null;
-                app.curReceiver = null;
+                app.curReceivers.remove(r);
             }
         }
     }
@@ -397,8 +397,8 @@ public final class BroadcastQueue {
         }
         r.receiver = null;
         r.intent.setComponent(null);
-        if (r.curApp != null && r.curApp.curReceiver == r) {
-            r.curApp.curReceiver = null;
+        if (r.curApp != null && r.curApp.curReceivers.contains(r)) {
+            r.curApp.curReceivers.remove(r);
         }
         if (r.curFilter != null) {
             r.curFilter.receiverList.curBroadcast = null;
@@ -420,17 +420,17 @@ public final class BroadcastQueue {
         if (waitForServices && r.curComponent != null && r.queue.mDelayBehindServices
                 && r.queue.mOrderedBroadcasts.size() > 0
                 && r.queue.mOrderedBroadcasts.get(0) == r) {
-            ActivityInfo nextReceiver;
+            ResolveInfo nextReceiver;
             if (r.nextReceiver < r.receivers.size()) {
                 Object obj = r.receivers.get(r.nextReceiver);
-                nextReceiver = (obj instanceof ActivityInfo) ? (ActivityInfo)obj : null;
+                nextReceiver = (obj instanceof ResolveInfo) ? (ResolveInfo)obj : null;
             } else {
                 nextReceiver = null;
             }
             // Don't do this if the next receive is in the same process as the current one.
             if (receiver == null || nextReceiver == null
-                    || receiver.applicationInfo.uid != nextReceiver.applicationInfo.uid
-                    || !receiver.processName.equals(nextReceiver.processName)) {
+                    || receiver.applicationInfo.uid != nextReceiver.activityInfo.applicationInfo.uid
+                    || !receiver.processName.equals(nextReceiver.activityInfo.processName)) {
                 // In this case, we are ready to process the next receiver for the current broadcast,
                 // but are on a queue that would like to wait for services to finish before moving
                 // on.  If there are background services currently starting, then we will go into a
@@ -651,7 +651,7 @@ public final class BroadcastQueue {
                 // things that directly call the IActivityManager API, which
                 // are already core system stuff so don't matter for this.
                 r.curApp = filter.receiverList.app;
-                filter.receiverList.app.curReceiver = r;
+                filter.receiverList.app.curReceivers.add(r);
                 mService.updateOomAdjLocked(r.curApp);
             }
         }
@@ -679,7 +679,7 @@ public final class BroadcastQueue {
                 r.curFilter = null;
                 filter.receiverList.curBroadcast = null;
                 if (filter.receiverList.app != null) {
-                    filter.receiverList.app.curReceiver = null;
+                    filter.receiverList.app.curReceivers.remove(r);
                 }
             }
         }
@@ -1435,6 +1435,14 @@ public final class BroadcastQueue {
 
         for (int i = mOrderedBroadcasts.size() - 1; i >= 0; i--) {
             didSomething |= mOrderedBroadcasts.get(i).cleanupDisabledPackageReceiversLocked(
+                    packageName, filterByClasses, userId, doit);
+            if (!doit && didSomething) {
+                return true;
+            }
+        }
+
+        if(mPendingBroadcast != null){
+            didSomething |= mPendingBroadcast.cleanupDisabledPackageReceiversLocked(
                     packageName, filterByClasses, userId, doit);
             if (!doit && didSomething) {
                 return true;

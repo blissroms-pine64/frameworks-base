@@ -143,6 +143,8 @@ import com.android.server.LocalServices;
 import com.android.server.UiThread;
 import com.android.server.Watchdog;
 import com.android.server.input.InputManagerService;
+import com.android.server.lights.Light;
+import com.android.server.lights.LightsManager;
 import com.android.server.policy.PhoneWindowManager;
 import com.android.server.power.ShutdownThread;
 
@@ -532,6 +534,7 @@ public class WindowManagerService extends IWindowManager.Stub
 
     boolean mDisplayReady;
     boolean mSafeMode;
+    boolean mDisableOverlays;
     boolean mDisplayEnabled = false;
     boolean mSystemBooted = false;
     boolean mForceDisplayEnabled = false;
@@ -5769,6 +5772,11 @@ public class WindowManagerService extends IWindowManager.Stub
         mPointerEventDispatcher.unregisterInputEventListener(listener);
     }
 
+    @Override
+    public void addSystemUIVisibilityFlag(int flags) {
+        mLastStatusBarVisibility |= flags;
+    }
+
     // Called by window manager policy. Not exposed externally.
     @Override
     public int getLidState() {
@@ -6085,6 +6093,17 @@ public class WindowManagerService extends IWindowManager.Stub
 
         mPolicy.enableScreenAfterBoot();
 
+        // clear any intrusive lighting which may still be on from the
+        // crypto landing ui
+        LightsManager lm = LocalServices.getService(LightsManager.class);
+        Light batteryLight = lm.getLight(LightsManager.LIGHT_ID_BATTERY);
+        Light notifLight = lm.getLight(LightsManager.LIGHT_ID_NOTIFICATIONS);
+        if (batteryLight != null) {
+            batteryLight.turnOff();
+        }
+        if (notifLight != null) {
+            notifLight.turnOff();
+        }
         // Make sure the last requested orientation has been applied.
         updateRotationUnchecked(false, false);
     }
@@ -8162,6 +8181,27 @@ public class WindowManagerService extends IWindowManager.Stub
         }
         mPolicy.setSafeMode(mSafeMode);
         return mSafeMode;
+    }
+
+    public boolean detectDisableOverlays() {
+        if (!mInputMonitor.waitForInputDevicesReady(
+                INPUT_DEVICES_READY_FOR_SAFE_MODE_DETECTION_TIMEOUT_MILLIS)) {
+            Slog.w(TAG_WM, "Devices still not ready after waiting "
+                   + INPUT_DEVICES_READY_FOR_SAFE_MODE_DETECTION_TIMEOUT_MILLIS
+                   + " milliseconds before attempting to detect safe mode.");
+        }
+
+        int volumeUpState = mInputManager.getKeyCodeState(-1, InputDevice.SOURCE_ANY,
+                KeyEvent.KEYCODE_VOLUME_UP);
+        mDisableOverlays = volumeUpState > 0;
+
+        if (mDisableOverlays) {
+            Log.i(TAG_WM, "All enabled theme overlays will now be disabled.");
+        } else {
+            Log.i(TAG_WM, "System will boot with enabled overlays intact.");
+        }
+
+        return mDisableOverlays;
     }
 
     public void displayReady() {

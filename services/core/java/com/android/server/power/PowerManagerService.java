@@ -611,25 +611,6 @@ public final class PowerManagerService extends SystemService
             mDisplayManagerInternal.initPowerManagement(
                     mDisplayPowerCallbacks, mHandler, sensorManager);
 
-            // Register for broadcasts from other components of the system.
-            IntentFilter filter = new IntentFilter();
-            filter.addAction(Intent.ACTION_BATTERY_CHANGED);
-            filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
-            mContext.registerReceiver(new BatteryReceiver(), filter, null, mHandler);
-
-            filter = new IntentFilter();
-            filter.addAction(Intent.ACTION_DREAMING_STARTED);
-            filter.addAction(Intent.ACTION_DREAMING_STOPPED);
-            mContext.registerReceiver(new DreamReceiver(), filter, null, mHandler);
-
-            filter = new IntentFilter();
-            filter.addAction(Intent.ACTION_USER_SWITCHED);
-            mContext.registerReceiver(new UserSwitchedReceiver(), filter, null, mHandler);
-
-            filter = new IntentFilter();
-            filter.addAction(Intent.ACTION_DOCK_EVENT);
-            mContext.registerReceiver(new DockReceiver(), filter, null, mHandler);
-
             // Register for settings changes.
             final ContentResolver resolver = mContext.getContentResolver();
             resolver.registerContentObserver(Settings.Secure.getUriFor(
@@ -689,6 +670,25 @@ public final class PowerManagerService extends SystemService
             mDirty |= DIRTY_BATTERY_STATE;
             updatePowerStateLocked();
         }
+
+        // Register for broadcasts from other components of the system.
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_BATTERY_CHANGED);
+        filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
+        mContext.registerReceiver(new BatteryReceiver(), filter, null, mHandler);
+
+        filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_DREAMING_STARTED);
+        filter.addAction(Intent.ACTION_DREAMING_STOPPED);
+        mContext.registerReceiver(new DreamReceiver(), filter, null, mHandler);
+
+        filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_USER_SWITCHED);
+        mContext.registerReceiver(new UserSwitchedReceiver(), filter, null, mHandler);
+
+        filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_DOCK_EVENT);
+        mContext.registerReceiver(new DockReceiver(), filter, null, mHandler);
     }
 
     private void readConfigurationLocked() {
@@ -1567,6 +1567,12 @@ public final class PowerManagerService extends SystemService
 
         // Don't wake while theater mode is enabled.
         if (mTheaterModeEnabled && !mWakeUpWhenPluggedOrUnpluggedInTheaterModeConfig) {
+	    return false;
+        }
+
+        if (Settings.System.getIntForUser(mContext.getContentResolver(),
+                Settings.System.WAKEUP_WHEN_PLUGGED_UNPLUGGED, 1,
+                UserHandle.USER_CURRENT) == 0) {
             return false;
         }
 

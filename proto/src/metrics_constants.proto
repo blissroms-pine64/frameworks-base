@@ -2249,5 +2249,15 @@ message MetricsEvent {
 
     // Add new aosp constants above this line.
     // END OF AOSP CONSTANTS
+
+    // Blissify
+    BLISSIFY = 413;
+
+    // Quick setting tiles
+    QUICK_SETTINGS = 412;
+
+    // AboutBliss Constants
+    ABOUT_BLISS = 499;
+
   }
 }

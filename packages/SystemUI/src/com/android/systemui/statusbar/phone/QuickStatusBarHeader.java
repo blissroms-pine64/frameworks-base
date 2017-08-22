@@ -19,11 +19,14 @@ package com.android.systemui.statusbar.phone;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
+import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.UserManager;
+import android.os.UserHandle;
+import android.provider.Settings;
 import android.util.AttributeSet;
 import android.util.SparseBooleanArray;
 import android.view.View;
@@ -38,6 +41,7 @@ import com.android.internal.logging.MetricsProto;
 import com.android.keyguard.KeyguardStatusView;
 import com.android.systemui.FontSizeUtils;
 import com.android.systemui.R;
+import com.android.systemui.bliss.UserContentObserver;
 import com.android.systemui.qs.QSPanel;
 import com.android.systemui.qs.QSPanel.Callback;
 import com.android.systemui.qs.QuickQSPanel;
@@ -100,6 +104,11 @@ public class QuickStatusBarHeader extends BaseStatusBarHeader implements
     private SparseBooleanArray mRoamingsBySubId = new SparseBooleanArray();
     private boolean mIsRoaming;
 
+    private boolean hasSettingsIcon;
+    private boolean hasEdit;
+    private boolean hasExpandIndicator;
+    private boolean hasMultiUserSwitch;
+
     public QuickStatusBarHeader(Context context, AttributeSet attrs) {
         super(context, attrs);
     }
@@ -141,7 +150,6 @@ public class QuickStatusBarHeader extends BaseStatusBarHeader implements
         // settings), so disable it for this view
         ((RippleDrawable) mSettingsButton.getBackground()).setForceSoftware(true);
         ((RippleDrawable) mExpandIndicator.getBackground()).setForceSoftware(true);
-
         updateResources();
     }
 
@@ -278,9 +286,16 @@ public class QuickStatusBarHeader extends BaseStatusBarHeader implements
         mSettingsContainer.findViewById(R.id.tuner_icon).setVisibility(
                 TunerService.isTunerEnabled(mContext) ? View.VISIBLE : View.INVISIBLE);
         final boolean isDemo = UserManager.isDeviceInDemoMode(mContext);
-        mMultiUserSwitch.setVisibility(mExpanded && mMultiUserSwitch.hasMultipleUsers() && !isDemo
-                ? View.VISIBLE : View.INVISIBLE);
-        mEdit.setVisibility(isDemo || !mExpanded ? View.INVISIBLE : View.VISIBLE);
+        hasMultiUserSwitch = !isMultiUserSwitchDisabled();
+        mMultiUserSwitch.setVisibility(mExpanded && hasMultiUserSwitch && !isDemo
+                ? View.VISIBLE : View.GONE);
+        mMultiUserAvatar.setVisibility(hasMultiUserSwitch ? View.VISIBLE : View.GONE);
+        hasEdit = !isEditDisabled();
+        mEdit.setVisibility(hasEdit && !isDemo && mExpanded ? View.VISIBLE : View.GONE);
+        hasSettingsIcon = !isSettingsIconDisabled();
+        mSettingsButton.setVisibility(hasSettingsIcon ? View.VISIBLE : View.GONE);
+        hasExpandIndicator = !isExpandIndicatorDisabled();
+        mExpandIndicator.setVisibility(hasExpandIndicator ? View.VISIBLE : View.GONE);
     }
 
     private void updateDateTimePosition() {
@@ -301,7 +316,6 @@ public class QuickStatusBarHeader extends BaseStatusBarHeader implements
             mHost.getNetworkController().removeSignalCallback(this);
         }
     }
-
     @Override
     public void setActivityStarter(ActivityStarter activityStarter) {
         mActivityStarter = activityStarter;
@@ -337,24 +351,7 @@ public class QuickStatusBarHeader extends BaseStatusBarHeader implements
             MetricsLogger.action(mContext,
                     mExpanded ? MetricsProto.MetricsEvent.ACTION_QS_EXPANDED_SETTINGS_LAUNCH
                             : MetricsProto.MetricsEvent.ACTION_QS_COLLAPSED_SETTINGS_LAUNCH);
-            if (mSettingsButton.isTunerClick()) {
-                mHost.startRunnableDismissingKeyguard(() -> post(() -> {
-                    if (TunerService.isTunerEnabled(mContext)) {
-                        TunerService.showResetRequest(mContext, () -> {
-                            // Relaunch settings so that the tuner disappears.
-                            startSettingsActivity();
-                        });
-                    } else {
-                        Toast.makeText(getContext(), R.string.tuner_toast,
-                                Toast.LENGTH_LONG).show();
-                        TunerService.setTunerEnabled(mContext, true);
-                    }
-                    startSettingsActivity();
-
-                }));
-            } else {
                 startSettingsActivity();
-            }
         } else if (v == mAlarmStatus && mNextAlarm != null) {
             PendingIntent showIntent = mNextAlarm.getShowIntent();
             mActivityStarter.startPendingIntentDismissingKeyguard(showIntent);
@@ -423,5 +420,25 @@ public class QuickStatusBarHeader extends BaseStatusBarHeader implements
     @Override
     public void onUserInfoChanged(String name, Drawable picture) {
         mMultiUserAvatar.setImageDrawable(picture);
+    }
+
+    public boolean isSettingsIconDisabled() {
+        return Settings.System.getInt(mContext.getContentResolver(),
+            Settings.System.QS_SETTINGS_ICON_TOGGLE, 0) == 1;
+    }
+
+    public boolean isEditDisabled() {
+        return Settings.System.getInt(mContext.getContentResolver(),
+            Settings.System.QS_EDIT_TOGGLE, 0) == 1;
+    }
+
+    public boolean isExpandIndicatorDisabled() {
+        return Settings.System.getInt(mContext.getContentResolver(),
+            Settings.System.QS_EXPAND_INDICATOR_TOGGLE, 0) == 1;
+    }
+
+    public boolean isMultiUserSwitchDisabled() {
+        return Settings.System.getInt(mContext.getContentResolver(),
+            Settings.System.QS_MULTIUSER_SWITCH_TOGGLE, 0) == 1;
     }
 }

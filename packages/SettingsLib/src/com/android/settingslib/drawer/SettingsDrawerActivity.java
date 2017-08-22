@@ -264,11 +264,9 @@ public class SettingsDrawerActivity extends Activity {
 
     public void showMenuIcon() {
         mShowingMenu = true;
-        if (getActionBar() != null) {
-          getActionBar().setHomeAsUpIndicator(R.drawable.ic_menu);
-          getActionBar().setHomeActionContentDescription(R.string.content_description_menu_button);
-          getActionBar().setDisplayHomeAsUpEnabled(true);
-        }
+        getActionBar().setHomeAsUpIndicator(R.drawable.ic_menu);
+        getActionBar().setHomeActionContentDescription(R.string.content_description_menu_button);
+        getActionBar().setDisplayHomeAsUpEnabled(true);
     }
 
     public List<DashboardCategory> getDashboardCategories() {
