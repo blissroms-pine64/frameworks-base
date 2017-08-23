@@ -766,7 +766,7 @@ public final class BluetoothAdapter {
         if (!isBleScanAlwaysAvailable()) return false;
 
         try {
-            String packageName = ActivityThread.currentPackageName();
+            String packageName = ActivityThread.currentPackageName(); 
             mManagerService.updateBleAppCount(mToken, true, packageName);
             if (isLeEnabled()) {
                 if (DBG) Log.d(TAG, "enableBLE(): Bluetooth already enabled");
